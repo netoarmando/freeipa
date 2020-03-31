@@ -3,6 +3,11 @@ MAINTAINER [FreeIPA Developers freeipa-devel@lists.fedorahosted.org]
 ENV container=docker LANG=en_US.utf8 LANGUAGE=en_US.utf8 LC_ALL=en_US.utf8
 
 ADD dist /root
+RUN echo $'[centos-8-stream-dev] \n\
+name = CentOS Developmental 8 \n\
+baseurl = http://mirror.centos.org/centos/8-stream/Devel/x86_64/os/ \n\
+enabled = 1 \n\
+gpgcheck = 0' > /etc/yum.repos.d/centos-8-stream.repo
 RUN echo 'deltarpm = false' >> /etc/dnf/dnf.conf \
     && dnf update -y dnf \
     && dnf install -y dnf-plugins-core sudo wget systemd firewalld nss-tools iptables \
