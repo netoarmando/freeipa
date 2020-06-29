@@ -30,13 +30,17 @@ import email
 import json
 import logging
 import os
-import pytest
+import random
 import textwrap
-
+from collections import deque
 from subprocess import CalledProcessError
 
-from ipatests.test_integration.base import IntegrationTest
+import homoglyphs as hg
+import ldif
+import pytest
+
 from ipatests.pytest_ipa.integration import tasks
+from ipatests.test_integration.base import IntegrationTest
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +61,66 @@ def datetime_to_generalized_time(dt):
 
 def postconf(host, option):
     host.run_command(r"postconf -e '%s'" % option)
+
+
+def generate_user(host, uid, **kwargs):
+    user_defaults = {
+        'objectClass': [
+            'ipaobject',
+            'person',
+            'top',
+            'ipasshuser',
+            'inetorgperson',
+            'organizationalperson',
+            'krbticketpolicyaux',
+            'krbprincipalaux',
+            'inetuser',
+            'posixaccount',
+            'ipaSshGroupOfPubKeys',
+            'mepOriginEntry'],
+        'ipaUniqueID': ['autogenerate'],
+        'loginShell': ['/bin/zsh'],
+        'uidNumber': ['-1'],
+        'gidNumber': ['-1'],
+    }
+
+    user = dict(user_defaults)
+    user['dn'] = 'uid={uid},cn=users,cn=accounts,{suffix}'.format(
+        uid=uid,
+        suffix=host.basedn,
+    )
+    user['uid'] = [uid]
+    user['displayName'] = ['{0} {0}'.format(uid)]
+    user['initials'] = ['{}{}'.format(uid[1], uid[-1])]
+    user['gecos'] = user['displayName']
+    user['sn'] = [uid]
+    user['homeDirectory'] = ['/other-home/{}'.format(uid)]
+    user['mail'] = ['{uid}@{domain}'.format(
+        uid=uid, domain=host.domain)]
+    user['krbPrincipalName'] = ['{uid}@{realm}'.format(
+        uid=uid, realm=host.realm)]
+    user['krbCanonicalName'] = ['{uid}@{realm}'.format(
+        uid=uid, realm=host.realm)]
+    user['givenName'] = [uid]
+    user['cn'] = ['{0} {0}'.format(uid)]
+
+    if "krbPasswordExpiration" in kwargs.keys():
+        user['krbPasswordExpiration'] = kwargs['krbPasswordExpiration']
+
+    if "userPassword" in kwargs.keys():
+        user['userPassword'] = kwargs['userPassword']
+
+    if "Mail2" in kwargs.keys():
+        user['Mail2'] = kwargs['Mail2']
+
+    if "Mail3" in kwargs.keys():
+        user['Mail3'] = kwargs['Mail3']
+
+    return user
+
+
+def generate_user_ldif(user_dict):
+    return ldif.CreateLDIF(dn=user_dict['dn'],record=user_dict)
 
 
 def configure_postfix(host, realm):
@@ -674,3 +738,97 @@ class TestEPN(IntegrationTest):
             self.master, dry_run=True
         )
         assert "uid=admin" in stderr_text
+
+    def generate_user_batch(self):
+        """
+        Prepare large (10k) batch of users with various attributes, namely
+        without passwords, gradually expiring passwords, unicode names and
+        unicode e-mails
+        :return: None
+        """
+        users_in_group = 2000
+        user_password = "Secret123"
+        users = deque()
+
+        # Users without passwords
+        for i in range(users_in_group):
+            username = "user_wo_pass_%d" % i
+            user = generate_user(self.master, username)
+            users.append(user)
+
+        # Users with passwords gradually expiring
+        for i in range(users_in_group):
+            username = "user_with_pass_%d" % i
+
+            expiration = datetime_to_generalized_time(
+                datetime.datetime.utcnow() + datetime.timedelta(days=7)
+            )
+
+            user = generate_user(self.master, username,
+                                 krbPasswordExpiration=expiration,
+                                 userPassword=user_password)
+            users.append(user)
+
+        # Users with wide unicode in usernames and with passwords to expire
+        all_langs = hg.Languages.get_all()
+        users_per_lang = users_in_group // len(all_langs)
+        remainder = users_in_group % len(all_langs)
+        expiration = datetime_to_generalized_time(
+            datetime.datetime.utcnow() + datetime.timedelta(days=7)
+        )
+        for language in all_langs:
+            for i in range(users_per_lang):
+                alphabet = hg.Languages.get_alphabet([language])
+                username = "%s_%s_%d" % (''.join(random.sample(alphabet, 8)),
+                                         language, i)
+                user = generate_user(self.master, username,
+                                     krbPasswordExpiration=expiration,
+                                     userPassword=user_password)
+                users.append(user)
+
+        # add remainder in pure ascii, just to keep correct count
+        for i in range(remainder):
+            username = "user_to_exp_ascii_%d" % i
+            user = generate_user(self.master, username,
+                                 krbPasswordExpiration=expiration,
+                                 userPassword=user_password)
+            users.append(user)
+
+        # Users with wide unicode in e-mail address
+        for language in all_langs:
+            for i in range(users_per_lang):
+                alphabet = hg.Languages.get_alphabet([language])
+                username = "user_with_unicode_name%d" % i
+                email = "%s.%d@%s" % (''.join(random.sample(alphabet, 8)),
+                                      i, self.master.domain)
+                user = generate_user(self.master, username,
+                                     krbPasswordExpiration=expiration,
+                                     userPassword=user_password,
+                                     Mail2=email)
+
+                users.append(user)
+
+        # add remainder in pure ascii, just to keep correct count
+        for i in range(remainder):
+            username = "user_to_exp_ascii_%d" % i
+            user = generate_user(self.master, username,
+                                 krbPasswordExpiration=expiration,
+                                 userPassword=user_password)
+            users.append(user)
+
+        # Users with multiple e-mail addresses
+        for i in range(users_in_group):
+            username = "user_multi_emails_%d" % i
+            email_1 = "%s_1@%s" % (username, self.master.domain)
+            email_2 = "%s_2@%s" % (username, self.master.domain)
+
+            user = generate_user(self.master, username,
+                                 krbPasswordExpiration=expiration,
+                                 userPassword=user_password,
+                                 Mail2=email_1,
+                                 Mail3=email_2)
+            users.append(user)
+
+    def add_user_batch_to_ldap(self, users):
+        for user in users:
+            tasks.ldap_add(self.master, str(generate_user_ldif(user)))
