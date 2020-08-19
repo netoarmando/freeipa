@@ -403,7 +403,7 @@ WHEELBUNDLEDIR = $(top_builddir)/dist/bundle
 @MK_ENDIF@
 
 # additional wheels for bundle, e.g. IPA_EXTRA_WHEELS="ipatests[webui] pylint"
-IPA_EXTRA_WHEELS=
+IPA_EXTRA_WHEELS="ipatests[integration]"
 
 $(WHEELDISTDIR):
 	mkdir -p $(WHEELDISTDIR)
